@@ -6,6 +6,7 @@ import numpy as np
 import util
 import imageio
 import util_gau
+import gausCoder
 import tkinter as tk
 from tkinter import filedialog
 import os
@@ -203,6 +204,19 @@ def main():
                             g_renderer.update_gaussian_data(gaussians)
                             g_renderer.sort_and_update(g_camera)
                         except RuntimeError as e:
+                            pass
+
+                if imgui.button(label='open comp'):
+                    file_path = filedialog.askopenfilename(title="open comp",
+                        initialdir="C:\\Users\\MSI_NB\\Downloads\\viewers",
+                        filetypes=[('comp file', '.comp')]
+                        )
+                    if file_path:
+                        try:
+                            gaussians = gausCoder.GaussDecoder.decode(file_path)
+                            g_renderer.update_gaussian_data(gaussians)
+                            g_renderer.sort_and_update(g_camera)
+                        except Exception:
                             pass
                 
                 # camera fov
