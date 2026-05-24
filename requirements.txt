@@ -5,3 +5,4 @@ PyOpenGL
 numpy
 imageio
 plyfile
+hilbertcurve

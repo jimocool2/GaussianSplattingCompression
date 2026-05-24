@@ -209,7 +209,7 @@ def main():
                 if imgui.button(label='open comp'):
                     file_path = filedialog.askopenfilename(title="open comp",
                         initialdir="C:\\Users\\MSI_NB\\Downloads\\viewers",
-                        filetypes=[('comp file', '.comp')]
+                        filetypes=[('comp file', '.ply.comp')]
                         )
                     if file_path:
                         try:
