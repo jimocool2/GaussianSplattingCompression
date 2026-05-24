@@ -11,6 +11,7 @@ from util_gau import GaussianData
 
 FLAGS_HILBERT = 0x01
 FLAGS_QUANTIZED = 0x02
+FLAGS_VQ = 0x04
 
 class GaussEncoder:
     MAGIC = b'GCZ1'
@@ -29,10 +30,11 @@ class GaussEncoder:
             scale = 1.0
         q = np.round((arr - mn) / scale * self.levels).clip(0, self.levels).astype(self.dtype)
         return q, mn, mx
-    
+
     @staticmethod
     def _prune_by_opacity(gau: GaussianData, threshold: float) -> GaussianData:
-        mask = gau.opacity[:, 0] > threshold
+        # Opacity is stored as logits, so apply sigmoid before thresholding.
+        mask = 1.0 / (1.0 + np.exp(-gau.opacity))[:, 0] > threshold
         return GaussianData(
             gau.xyz[mask], gau.rot[mask], gau.scale[mask],
             gau.opacity[mask], gau.sh[mask]
@@ -44,15 +46,23 @@ class GaussEncoder:
         if args.get("po") is not None:
             gau = self._prune_by_opacity(gau, args["po"])
 
-        if args.get("ps") is not None:
-            ...
-
         if args.get("hilbert"):
             order = hilbert_sort(gau.xyz)
             gau = apply_order(gau, order)
             flags |= FLAGS_HILBERT
 
-        raw_attrs = [gau.xyz, gau.rot, gau.scale, gau.opacity, gau.sh]
+        # Vector quantization of color (f_dc) + SH (f_rest). Runs after pruning
+        # and sorting, so labels follow the final Gaussian order.
+        use_vq = args.get("vq") is not None
+        if use_vq:
+            flags |= FLAGS_VQ
+            k = int(args["vq"])
+            cb_dc, lbl_dc, cb_rest, lbl_rest = vq_encode_sh(gau.sh, k, k)
+            raw_attrs = [gau.xyz, gau.rot, gau.scale, gau.opacity]
+        else:
+            raw_attrs = [gau.xyz, gau.rot, gau.scale, gau.opacity, gau.sh]
+
+        # Delta only the scalar attrs; VQ indices are not delta coded.
         if flags & FLAGS_HILBERT:
             attrs_delta = [delta_encode(a) for a in raw_attrs]
         else:
@@ -78,7 +88,20 @@ class GaussEncoder:
             for a in attrs_delta:
                 buf += a.astype(np.float32).tobytes()
 
-        use_zlib = args.get("hilbert") or args.get("compress")
+        # VQ block: codebooks stay float32 (small) and are independent of -q.
+        if use_vq:
+            _, nb_dc = vq_idx_dtype(len(cb_dc))
+            k_rest = len(cb_rest)
+            nb_rest = vq_idx_dtype(k_rest)[1] if k_rest > 0 else 1
+            buf += struct.pack('<IIBB', len(cb_dc), k_rest, nb_dc, nb_rest)
+            buf += np.ascontiguousarray(cb_dc, np.float32).tobytes()
+            buf += lbl_dc.astype(np.uint8 if nb_dc == 1 else np.uint16).tobytes()
+            if k_rest > 0:
+                buf += np.ascontiguousarray(cb_rest, np.float32).tobytes()
+                buf += lbl_rest.astype(np.uint8 if nb_rest == 1 else np.uint16).tobytes()
+
+        # zlib also benefits VQ: spatially sorted neighbours reuse indices.
+        use_zlib = args.get("hilbert") or args.get("compress") or use_vq
         out = zlib.compress(bytes(buf), level=6) if use_zlib else bytes(buf)
         with open(out_path, 'wb') as f:
             f.write(out)
@@ -88,44 +111,62 @@ class GaussDecoder:
     @staticmethod
     def decode(in_path: str) -> GaussianData:
         MAGIC = b'GCZ1'
-        with open(in_path, 'rb') as f:
-            raw = f.read()
-            data = raw if raw[:4] == MAGIC else zlib.decompress(raw)
-            f = io.BytesIO(data)
-            magic = f.read(4)
+        with open(in_path, 'rb') as fh:
+            raw = fh.read()
+        data = raw if raw[:4] == MAGIC else zlib.decompress(raw)
+        f = io.BytesIO(data)
+        magic = f.read(4)
+        assert magic == MAGIC, f"Bad magic: {magic}"
+        n, sh_dim, bits, flags = struct.unpack('<IHBB', f.read(8))
 
-            assert magic == MAGIC, f"Bad magic: {magic}"
-            n, sh_dim, bits, flags = struct.unpack('<IHBB', f.read(8))
-
+        if flags & FLAGS_VQ:
+            shapes = [(n, 3), (n, 4), (n, 3), (n, 1)]
+        else:
             shapes = [(n, 3), (n, 4), (n, 3), (n, 1), (n, sh_dim)]
-            arrays = []
 
-            if flags & FLAGS_QUANTIZED:
-                dtype = np.uint8 if bits == 8 else np.uint16
-                levels = (1 << bits) - 1
-                mins_maxs = [struct.unpack('<ff', f.read(8)) for _ in range(5)]
-                for (mn, mx), shape in zip(mins_maxs, shapes):
-                    count = shape[0] * shape[1]
-                    raw = np.frombuffer(f.read(count * np.dtype(dtype).itemsize), dtype=dtype)
-                    dequant = (raw.astype(np.float32) / levels) * (mx - mn) + mn
-                    arr = dequant.reshape(shape)
-                    arrays.append(delta_decode(arr) if flags & FLAGS_HILBERT else arr)
+        arrays = []
+        if flags & FLAGS_QUANTIZED:
+            dtype = np.uint8 if bits == 8 else np.uint16
+            levels = (1 << bits) - 1
+            mins_maxs = [struct.unpack('<ff', f.read(8)) for _ in range(len(shapes))]
+            for (mn, mx), shape in zip(mins_maxs, shapes):
+                count = shape[0] * shape[1]
+                buf = np.frombuffer(f.read(count * np.dtype(dtype).itemsize), dtype=dtype)
+                dequant = (buf.astype(np.float32) / levels) * (mx - mn) + mn
+                arr = dequant.reshape(shape)
+                arrays.append(delta_decode(arr) if flags & FLAGS_HILBERT else arr)
+        else:
+            for shape in shapes:
+                count = shape[0] * shape[1]
+                buf = np.frombuffer(f.read(count * 4), dtype=np.float32)
+                arr = buf.reshape(shape)
+                arrays.append(delta_decode(arr) if flags & FLAGS_HILBERT else arr)
+
+        if flags & FLAGS_VQ:
+            k_dc, k_rest, nb_dc, nb_rest = struct.unpack('<IIBB', f.read(10))
+            dt_dc = np.uint8 if nb_dc == 1 else np.uint16
+            dt_rest = np.uint8 if nb_rest == 1 else np.uint16
+            cb_dc = np.frombuffer(f.read(k_dc * 3 * 4), dtype=np.float32).reshape(k_dc, 3)
+            lbl_dc = np.frombuffer(f.read(n * nb_dc), dtype=dt_dc)
+            if k_rest > 0:
+                rest_dim = sh_dim - 3
+                cb_rest = np.frombuffer(f.read(k_rest * rest_dim * 4), dtype=np.float32).reshape(k_rest, rest_dim)
+                lbl_rest = np.frombuffer(f.read(n * nb_rest), dtype=dt_rest)
             else:
-                for shape in shapes:
-                    count = shape[0] * shape[1]
-                    raw = np.frombuffer(f.read(count * 4), dtype=np.float32)
-                    arr = raw.reshape(shape)
-                    arrays.append(delta_decode(arr) if flags & FLAGS_HILBERT else arr)
-
-        xyz, rots, scales, opacities, shs = arrays
+                cb_rest = np.zeros((0, 0), dtype=np.float32)
+                lbl_rest = np.zeros(n, dtype=np.int64)
+            sh = vq_decode_sh(cb_dc, lbl_dc, cb_rest, lbl_rest)
+            xyz, rots, scales, opacities = arrays
+        else:
+            xyz, rots, scales, opacities, sh = arrays
 
         # Apply activations
         rots = rots / np.linalg.norm(rots, axis=-1, keepdims=True)
         scales = np.exp(scales)
         opacities = 1.0 / (1.0 + np.exp(-opacities))
 
-        return GaussianData(xyz, rots, scales, opacities, shs)
-    
+        return GaussianData(xyz, rots, scales, opacities, sh)
+
 if __name__ == "__main__":
     import argparse
     from pathlib import Path

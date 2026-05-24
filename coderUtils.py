@@ -36,6 +36,72 @@ def delta_encode(arr: np.ndarray) -> np.ndarray:
 def delta_decode(arr: np.ndarray) -> np.ndarray:
     return np.cumsum(arr, axis=0)
 
+# ---------- Vector Quantization ---------
+
+def vq_idx_dtype(k):
+    # 1 byte per index up to 256 codewords, else 2 bytes
+    return (np.uint8, 1) if k <= 256 else (np.uint16, 2)
+
+
+def _vq_assign(data, cb, mem_cap=8_000_000):
+    # nearest-codeword index per row, in memory-bounded batches
+    k = len(cb)
+    batch = max(1024, mem_cap // max(k, 1))
+    cb_sq = np.einsum('ij,ij->i', cb, cb)
+    labels = np.empty(len(data), dtype=np.int64)
+    for s in range(0, len(data), batch):
+        x = data[s:s + batch]
+        d = cb_sq[None, :] - 2.0 * (x @ cb.T)  # drop ||x||^2 (constant per row)
+        labels[s:s + batch] = d.argmin(axis=1)
+    return labels
+
+
+def vq_fit(data, k, iters=12, sample=120_000, seed=0):
+    # Lloyd k-means trained on a subsample, then assign all rows.
+    # Returns (codebook (K,d) float32, labels (n,) int64). K = min(k, n).
+    data = np.ascontiguousarray(data, dtype=np.float32)
+    n, d = data.shape
+    k = int(max(1, min(k, n)))
+    rng = np.random.default_rng(seed)
+    train = data if n <= sample else data[rng.choice(n, sample, replace=False)]
+    cb = np.ascontiguousarray(train[rng.choice(len(train), k, replace=False)])
+    for _ in range(iters):
+        lbl = _vq_assign(train, cb)
+        counts = np.bincount(lbl, minlength=k).astype(np.float32)
+        sums = np.empty((k, d), dtype=np.float32)
+        for c in range(d):
+            sums[:, c] = np.bincount(lbl, weights=train[:, c], minlength=k)
+        nz = counts > 0
+        new_cb = cb.copy()
+        new_cb[nz] = sums[nz] / counts[nz, None]
+        empty = np.where(~nz)[0]
+        if empty.size:
+            new_cb[empty] = train[rng.integers(0, len(train), empty.size)]
+        moved = np.abs(new_cb - cb).max()
+        cb = new_cb
+        if moved < 1e-6:
+            break
+    return cb, _vq_assign(data, cb)
+
+
+def vq_encode_sh(sh, k_color, k_rest, seed=0):
+    # Split sh into DC color (first 3 cols) and SH rest; one codebook each.
+    sh = np.ascontiguousarray(sh, dtype=np.float32)
+    cb_dc, lbl_dc = vq_fit(sh[:, :3], k_color, seed=seed)
+    if sh.shape[1] > 3:
+        cb_rest, lbl_rest = vq_fit(sh[:, 3:], k_rest, seed=seed + 1)
+    else:
+        cb_rest = np.zeros((0, 0), dtype=np.float32)
+        lbl_rest = np.zeros(len(sh), dtype=np.int64)
+    return cb_dc, lbl_dc, cb_rest, lbl_rest
+
+
+def vq_decode_sh(cb_dc, lbl_dc, cb_rest, lbl_rest):
+    dc = cb_dc[lbl_dc]
+    if cb_rest.shape[0] > 0:
+        return np.concatenate([dc, cb_rest[lbl_rest]], axis=1).astype(np.float32)
+    return dc.astype(np.float32)
+
 # ---------- Parser Functions ---------
 
 def set_parser(parser):
@@ -67,12 +133,12 @@ def set_parser(parser):
     )
 
     parser.add_argument(
-        "-ps",
-        type=float,
+        "-vq",
+        type=int,
         nargs="?",
-        const=0.0025,
+        const=4096,
         default=None,
-        help="Size pruning threshold"
+        help="Vector quantize color (f_dc) and SH (f_rest); value = codebook size (default 4096)."
     )
 
     parser.add_argument(
@@ -86,8 +152,8 @@ def set_parser(parser):
 def check_args(args):
     if args.po is not None and not (0.0001 <= args.po <= 1.0):
         raise ValueError("Opacity pruning threshold must be between 0.0001 and 1.0")
-    if args.ps is not None and args.ps < 0:
-        raise ValueError("Size pruning threshold must be non-negative")
+    if args.vq is not None and args.vq < 1:
+        raise ValueError("VQ codebook size must be >= 1")
 
 # ---------- Helper Classes ---------
 
