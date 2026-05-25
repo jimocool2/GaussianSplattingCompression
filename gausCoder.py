@@ -79,13 +79,17 @@ class GaussEncoder:
         buf += self.MAGIC
         buf += struct.pack('<IHBB', n, sh_dim, bits, flags)
         if self.bits is not None:
-            quants = [self._quantize(a) for a in attrs_delta]
+            quants = [self._quantize(a) for a in raw_attrs]
+            if flags & FLAGS_HILBERT:
+                quants = [(delta_encode(q), mn, mx) for q, mn, mx in quants]
             for q, mn, mx in quants:
                 buf += struct.pack('<ff', mn, mx)
             for q, mn, mx in quants:
                 buf += q.tobytes()
         else:
-            for a in attrs_delta:
+            if flags & FLAGS_HILBERT:
+                raw_attrs = [delta_encode(a) for a in raw_attrs]
+            for a in raw_attrs:
                 buf += a.astype(np.float32).tobytes()
 
         # VQ block: codebooks stay float32 (small) and are independent of -q.
@@ -100,8 +104,7 @@ class GaussEncoder:
                 buf += np.ascontiguousarray(cb_rest, np.float32).tobytes()
                 buf += lbl_rest.astype(np.uint8 if nb_rest == 1 else np.uint16).tobytes()
 
-        # zlib also benefits VQ: spatially sorted neighbours reuse indices.
-        use_zlib = args.get("hilbert") or args.get("compress") or use_vq
+        use_zlib = args.get("hilbert") or args.get("compress")
         out = zlib.compress(bytes(buf), level=6) if use_zlib else bytes(buf)
         with open(out_path, 'wb') as f:
             f.write(out)
@@ -131,10 +134,11 @@ class GaussDecoder:
             mins_maxs = [struct.unpack('<ff', f.read(8)) for _ in range(len(shapes))]
             for (mn, mx), shape in zip(mins_maxs, shapes):
                 count = shape[0] * shape[1]
-                buf = np.frombuffer(f.read(count * np.dtype(dtype).itemsize), dtype=dtype)
-                dequant = (buf.astype(np.float32) / levels) * (mx - mn) + mn
-                arr = dequant.reshape(shape)
-                arrays.append(delta_decode(arr) if flags & FLAGS_HILBERT else arr)
+                q = np.frombuffer(f.read(count * np.dtype(dtype).itemsize), dtype=dtype).reshape(shape)
+                if flags & FLAGS_HILBERT:
+                    q = np.cumsum(q, axis=0, dtype=dtype)
+                dequant = (q.astype(np.float32) / levels) * (mx - mn) + mn
+                arrays.append(dequant)
         else:
             for shape in shapes:
                 count = shape[0] * shape[1]
