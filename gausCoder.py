@@ -51,8 +51,6 @@ class GaussEncoder:
             gau = apply_order(gau, order)
             flags |= FLAGS_HILBERT
 
-        # Vector quantization of color (f_dc) + SH (f_rest). Runs after pruning
-        # and sorting, so labels follow the final Gaussian order.
         use_vq = args.get("vq") is not None
         if use_vq:
             flags |= FLAGS_VQ
@@ -61,12 +59,6 @@ class GaussEncoder:
             raw_attrs = [gau.xyz, gau.rot, gau.scale, gau.opacity]
         else:
             raw_attrs = [gau.xyz, gau.rot, gau.scale, gau.opacity, gau.sh]
-
-        # Delta only the scalar attrs; VQ indices are not delta coded.
-        if flags & FLAGS_HILBERT:
-            attrs_delta = [delta_encode(a) for a in raw_attrs]
-        else:
-            attrs_delta = raw_attrs
 
         n = len(gau.xyz)
         sh_dim = gau.sh.shape[-1]
@@ -92,7 +84,6 @@ class GaussEncoder:
             for a in raw_attrs:
                 buf += a.astype(np.float32).tobytes()
 
-        # VQ block: codebooks stay float32 (small) and are independent of -q.
         if use_vq:
             _, nb_dc = vq_idx_dtype(len(cb_dc))
             k_rest = len(cb_rest)

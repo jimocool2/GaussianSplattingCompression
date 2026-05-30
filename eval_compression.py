@@ -48,6 +48,10 @@ COMPRESSION_CONFIGS = [
      {"q": None, "hilbert": False, "po": None, "vq": 256,   "compress": False}),
     ("vq4096",
      {"q": None, "hilbert": False, "po": None, "vq": 4096,  "compress": False}),
+     ("po0.08",
+     {"q": None, "hilbert": False, "po": 0.08, "vq": None,  "compress": False}),
+     ("po0.12",
+     {"q": None, "hilbert": False, "po": 0.12, "vq": None,  "compress": False}),
     ("q16-hb",
      {"q": 16,   "hilbert": True,  "po": None, "vq": None,  "compress": False}),
     ("q16-vq256",
@@ -72,6 +76,10 @@ COMPRESSION_CONFIGS = [
      {"q": None, "hilbert": True,  "po": 0.12, "vq": 256,   "compress": False}),
     ("po0.12-hb-vq4096",
      {"q": None, "hilbert": True,  "po": 0.12, "vq": 4096,  "compress": False}),
+    ("po0.08-hb-vq256-q16",
+     {"q": 16, "hilbert": True, "po": 0.08, "vq": 256, "compress": False}),
+    ("po0.08-hb-vq4096-q16",
+     {"q": 16, "hilbert": True, "po": 0.08, "vq": 4096, "compress": False}),
 ]
 
 # ── GL helpers (called inside each child process) ─────────────────────────────
@@ -258,6 +266,7 @@ def _worker(ply_path_str):
         print(
             f"{tag} [{cfg_name:22s}] {enc_label:10s}  "
             f"size={comp_size/1024/1024:.2f}MB  ratio={ratio:.2f}x  "
+            f"gaus={len(decoded)}  "
             f"dec={dec_s:.3f}s  gpu={gpu_s:.3f}s  "
             f"PSNR={psnr_mean:.2f}dB  SSIM={ssim_mean:.4f}",
             flush=True
@@ -269,6 +278,7 @@ def _worker(ply_path_str):
             "ply_mb":    round(ply_size / 1024 / 1024, 3),
             "comp_mb":   round(comp_size / 1024 / 1024, 3),
             "ratio":     round(ratio, 3),
+            "num_gaus":  len(decoded),
             "enc_s":     round(enc_time, 2),
             "dec_s":     round(dec_s, 4),
             "gpu_s":     round(gpu_s, 4),
