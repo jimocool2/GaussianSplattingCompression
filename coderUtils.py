@@ -56,7 +56,23 @@ def _vq_assign(data, cb, mem_cap=8_000_000):
     return labels
 
 
-def vq_fit(data, k, iters=12, sample=120_000, seed=0):
+def _kmeanspp_init(train, k, rng):
+    n, d = train.shape
+    centers = np.empty((k, d), dtype=np.float32)
+    centers[0] = train[rng.integers(n)]
+    closest = np.sum((train - centers[0]) ** 2, axis=1)
+    for i in range(1, k):
+        total = closest.sum()
+        if total <= 0:
+            centers[i:] = train[rng.integers(0, n, k - i)]
+            break
+        idx = rng.choice(n, p=closest / total)
+        centers[i] = train[idx]
+        closest = np.minimum(closest, np.sum((train - centers[i]) ** 2, axis=1))
+    return np.ascontiguousarray(centers)
+
+
+def vq_fit(data, k, iters=16, sample=120_000, seed=0):
     # Lloyd k-means trained on a subsample, then assign all rows.
     # Returns (codebook (K,d) float32, labels (n,) int64). K = min(k, n).
     data = np.ascontiguousarray(data, dtype=np.float32)
@@ -64,7 +80,7 @@ def vq_fit(data, k, iters=12, sample=120_000, seed=0):
     k = int(max(1, min(k, n)))
     rng = np.random.default_rng(seed)
     train = data if n <= sample else data[rng.choice(n, sample, replace=False)]
-    cb = np.ascontiguousarray(train[rng.choice(len(train), k, replace=False)])
+    cb = _kmeanspp_init(train, k, rng)
     for _ in range(iters):
         lbl = _vq_assign(train, cb)
         counts = np.bincount(lbl, minlength=k).astype(np.float32)
