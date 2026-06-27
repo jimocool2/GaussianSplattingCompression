@@ -43,16 +43,22 @@ def vq_idx_dtype(k):
     return (np.uint8, 1) if k <= 256 else (np.uint16, 2)
 
 
-def _vq_assign(data, cb, mem_cap=8_000_000):
-    # nearest-codeword index per row, in memory-bounded batches
+def _vq_assign(data, cb, mem_cap=64_000_000):
+    data = np.ascontiguousarray(data, dtype=np.float32)
+    cb = np.ascontiguousarray(cb, dtype=np.float32)
+    cb_t = np.ascontiguousarray(cb.T)
     k = len(cb)
     batch = max(1024, mem_cap // max(k, 1))
     cb_sq = np.einsum('ij,ij->i', cb, cb)
     labels = np.empty(len(data), dtype=np.int64)
+    dbuf = np.empty((batch, k), dtype=np.float32)
     for s in range(0, len(data), batch):
         x = data[s:s + batch]
-        d = cb_sq[None, :] - 2.0 * (x @ cb.T)  # drop ||x||^2 (constant per row)
-        labels[s:s + batch] = d.argmin(axis=1)
+        out = dbuf[:len(x)]
+        np.dot(x, cb_t, out=out)
+        out *= -2.0
+        out += cb_sq[None, :]
+        labels[s:s + batch] = out.argmin(axis=1)
     return labels
 
 
@@ -72,7 +78,7 @@ def _kmeanspp_init(train, k, rng):
     return np.ascontiguousarray(centers)
 
 
-def vq_fit(data, k, iters=16, sample=120_000, seed=0):
+def vq_fit(data, k, iters=16, sample=1_600_000, seed=0):
     # Lloyd k-means trained on a subsample, then assign all rows.
     # Returns (codebook (K,d) float32, labels (n,) int64). K = min(k, n).
     data = np.ascontiguousarray(data, dtype=np.float32)
