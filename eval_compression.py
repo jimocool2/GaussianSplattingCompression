@@ -33,9 +33,11 @@ from renderer_ogl import OpenGLRenderer
 RENDER_W      = 1280
 RENDER_H      = 720
 RENDERS_DIR   = Path("./renders")
-CAMERA_ANGLES = [0, 120, 240]
+CAMERA_ANGLES = [0, 90, 180]
+DEFAULT_RADIUS = 3.0
+DEFAULT_UP = np.array([0.0, -1.0, 0.0], dtype=np.float32)
 
-MAX_WORKERS = 2
+MAX_WORKERS = 6
 
 COMPRESSION_CONFIGS = [
     ("q8",
@@ -48,9 +50,9 @@ COMPRESSION_CONFIGS = [
      {"q": None, "hilbert": False, "po": None, "vq": 256,   "compress": False}),
     ("vq4096",
      {"q": None, "hilbert": False, "po": None, "vq": 4096,  "compress": False}),
-     ("po0.08",
+    ("po0.08",
      {"q": None, "hilbert": False, "po": 0.08, "vq": None,  "compress": False}),
-     ("po0.12",
+    ("po0.12",
      {"q": None, "hilbert": False, "po": 0.12, "vq": None,  "compress": False}),
     ("q16-hb",
      {"q": 16,   "hilbert": True,  "po": None, "vq": None,  "compress": False}),
@@ -72,7 +74,7 @@ COMPRESSION_CONFIGS = [
      {"q": None, "hilbert": True,  "po": 0.08, "vq": 256,   "compress": False}),
     ("po0.08-hb-vq4096",
      {"q": None, "hilbert": True,  "po": 0.08, "vq": 4096,  "compress": False}),    
-     ("po0.12-hb-vq256",
+    ("po0.12-hb-vq256",
      {"q": None, "hilbert": True,  "po": 0.12, "vq": 256,   "compress": False}),
     ("po0.12-hb-vq4096",
      {"q": None, "hilbert": True,  "po": 0.12, "vq": 4096,  "compress": False}),
@@ -100,13 +102,13 @@ def _init_gl():
     return window
 
 
-def _make_camera(angle_deg):
+def _make_camera(angle_deg, radius=DEFAULT_RADIUS, up=DEFAULT_UP):
     cam = util.Camera(RENDER_H, RENDER_W)
-    r = 3.0
+    r = radius
     a = np.deg2rad(angle_deg)
     cam.position = np.array([r * np.sin(a), 0.0, r * np.cos(a)], dtype=np.float32)
     cam.target   = np.array([0.0, 0.0, 0.0], dtype=np.float32)
-    cam.up       = np.array([0.0, -1.0, 0.0], dtype=np.float32)
+    cam.up       = up
     cam.is_pose_dirty   = True
     cam.is_intrin_dirty = True
     return cam
@@ -141,11 +143,11 @@ def _all_exist(paths):
     return all(p.exists() for p in paths)
 
 
-def _render_and_save(renderer, gaussians, window, out_dir, prefix):
+def _render_and_save(renderer, gaussians, window, out_dir, prefix, radius, up):
     out_dir.mkdir(parents=True, exist_ok=True)
     imgs = []
     for angle in CAMERA_ANGLES:
-        cam = _make_camera(angle)
+        cam = _make_camera(angle, radius, up)
         img = _capture(renderer, gaussians, cam, window)
         imageio.imwrite(str(out_dir / f"{prefix}_angle{angle:03d}.png"), img)
         imgs.append(img)
@@ -194,6 +196,10 @@ def _worker(ply_path_str):
     name     = ply_path.stem
     ply_size = ply_path.stat().st_size
     tag      = f"[{name}|pid={os.getpid()}]"
+    name   = ply_path.stem
+    radius = 1.5 if "drjohnson" in name else DEFAULT_RADIUS
+    up = (np.array([1.0, 0.0, 0.0], dtype=np.float32) if "drjohnson" in name
+        else DEFAULT_UP)
 
     print(f"{tag} started", flush=True)
 
@@ -211,7 +217,7 @@ def _worker(ply_path_str):
     else:
         print(f"{tag} rendering reference views...", flush=True)
         gaussians = util_gau.load_ply(str(ply_path))
-        ref_imgs  = _render_and_save(renderer, gaussians, window, ref_dir, "ref")
+        ref_imgs  = _render_and_save(renderer, gaussians, window, ref_dir, "ref", radius, up)
 
     # Load raw once (shared across all encoder configs for this file)
     raw_gau = GaussLoader.load_ply_raw(str(ply_path))
@@ -255,7 +261,7 @@ def _worker(ply_path_str):
             cmp_imgs = _load_from_disk(comp_pngs)
         else:
             try:
-                cmp_imgs = _render_and_save(renderer, decoded, window, comp_dir, cfg_name)
+                cmp_imgs = _render_and_save(renderer, decoded, window, comp_dir, cfg_name, radius, up)
             except Exception as e:
                 print(f"{tag} [{cfg_name}] RENDER ERROR: {e}", flush=True)
                 continue
