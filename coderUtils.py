@@ -43,20 +43,42 @@ def vq_idx_dtype(k):
     return (np.uint8, 1) if k <= 256 else (np.uint16, 2)
 
 
-def _vq_assign(data, cb, mem_cap=8_000_000):
-    # nearest-codeword index per row, in memory-bounded batches
+def _vq_assign(data, cb, mem_cap=64_000_000):
+    data = np.ascontiguousarray(data, dtype=np.float32)
+    cb = np.ascontiguousarray(cb, dtype=np.float32)
+    cb_t = np.ascontiguousarray(cb.T)
     k = len(cb)
     batch = max(1024, mem_cap // max(k, 1))
     cb_sq = np.einsum('ij,ij->i', cb, cb)
     labels = np.empty(len(data), dtype=np.int64)
+    dbuf = np.empty((batch, k), dtype=np.float32)
     for s in range(0, len(data), batch):
         x = data[s:s + batch]
-        d = cb_sq[None, :] - 2.0 * (x @ cb.T)  # drop ||x||^2 (constant per row)
-        labels[s:s + batch] = d.argmin(axis=1)
+        out = dbuf[:len(x)]
+        np.dot(x, cb_t, out=out)
+        out *= -2.0
+        out += cb_sq[None, :]
+        labels[s:s + batch] = out.argmin(axis=1)
     return labels
 
 
-def vq_fit(data, k, iters=12, sample=120_000, seed=0):
+def _kmeanspp_init(train, k, rng):
+    n, d = train.shape
+    centers = np.empty((k, d), dtype=np.float32)
+    centers[0] = train[rng.integers(n)]
+    closest = np.sum((train - centers[0]) ** 2, axis=1)
+    for i in range(1, k):
+        total = closest.sum()
+        if total <= 0:
+            centers[i:] = train[rng.integers(0, n, k - i)]
+            break
+        idx = rng.choice(n, p=closest / total)
+        centers[i] = train[idx]
+        closest = np.minimum(closest, np.sum((train - centers[i]) ** 2, axis=1))
+    return np.ascontiguousarray(centers)
+
+
+def vq_fit(data, k, iters=16, sample=1_600_000, seed=0):
     # Lloyd k-means trained on a subsample, then assign all rows.
     # Returns (codebook (K,d) float32, labels (n,) int64). K = min(k, n).
     data = np.ascontiguousarray(data, dtype=np.float32)
@@ -64,7 +86,7 @@ def vq_fit(data, k, iters=12, sample=120_000, seed=0):
     k = int(max(1, min(k, n)))
     rng = np.random.default_rng(seed)
     train = data if n <= sample else data[rng.choice(n, sample, replace=False)]
-    cb = np.ascontiguousarray(train[rng.choice(len(train), k, replace=False)])
+    cb = _kmeanspp_init(train, k, rng)
     for _ in range(iters):
         lbl = _vq_assign(train, cb)
         counts = np.bincount(lbl, minlength=k).astype(np.float32)
